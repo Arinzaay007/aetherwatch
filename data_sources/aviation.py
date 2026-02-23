@@ -63,6 +63,48 @@ def _parse_opensky_state(state: list) -> dict | None:
     }
 
 
+
+def _fallback_aircraft(cache, cache_key):
+    """Try adsb.fi, fall back to mock."""
+    try:
+        import requests as _req
+        resp = _req.get(
+            "https://opendata.adsb.fi/api/v2/aircraft",
+            timeout=10,
+            headers={"User-Agent": "AetherWatch/1.0"}
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            aircraft = []
+            for ac in data.get("aircraft", [])[:500]:
+                if not ac.get("lat") or not ac.get("lon"):
+                    continue
+                aircraft.append({
+                    "icao24": ac.get("hex", ""),
+                    "callsign": (ac.get("flight") or "UNKNOWN").strip(),
+                    "origin_country": ac.get("r", ""),
+                    "latitude": float(ac.get("lat", 0)),
+                    "longitude": float(ac.get("lon", 0)),
+                    "altitude_ft": float(ac.get("alt_baro", 0) or 0),
+                    "altitude_m": float(ac.get("alt_baro", 0) or 0) * 0.3048,
+                    "velocity_kts": float(ac.get("gs", 0) or 0),
+                    "heading": float(ac.get("track", 0) or 0),
+                    "vertical_rate": float(ac.get("baro_rate", 0) or 0),
+                    "on_ground": ac.get("alt_baro") == "ground",
+                    "squawk": ac.get("squawk", "----"),
+                    "aircraft_type": ac.get("t", ""),
+                    "last_contact": 0,
+                    "is_mock": False,
+                })
+            if aircraft:
+                cache.set(cache_key, aircraft)
+                return aircraft
+    except Exception:
+        pass
+    mock = generate_mock_aircraft(500)
+    cache.set(cache_key, mock)
+    return mock
+
 def fetch_opensky(
     lamin: float = -90, lomin: float = -180,
     lamax: float = 90,  lomax: float = 180,
