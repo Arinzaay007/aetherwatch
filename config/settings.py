@@ -27,7 +27,12 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── Credentials (loaded from .env) ──────────────────────────────────────────
-OPENSKY_USERNAME: str = os.getenv("OPENSKY_USERNAME", "")
+try:
+    import streamlit as st
+    OPENSKY_USERNAME: str = st.secrets.get("OPENSKY_USERNAME", os.getenv("OPENSKY_USERNAME", ""))
+    OPENSKY_PASSWORD: str = st.secrets.get("OPENSKY_PASSWORD", os.getenv("OPENSKY_PASSWORD", ""))
+except Exception:
+    OPENSKY_USERNAME: str = os.getenv("OPENSKY_USERNAME", "")
 OPENSKY_PASSWORD: str = os.getenv("OPENSKY_PASSWORD", "")
 NASA_EARTHDATA_USERNAME: str = os.getenv("NASA_EARTHDATA_USERNAME", "")
 NASA_EARTHDATA_PASSWORD: str = os.getenv("NASA_EARTHDATA_PASSWORD", "")
