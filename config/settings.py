@@ -33,7 +33,7 @@ try:
     OPENSKY_PASSWORD: str = st.secrets.get("OPENSKY_PASSWORD", os.getenv("OPENSKY_PASSWORD", ""))
 except Exception:
     OPENSKY_USERNAME: str = os.getenv("OPENSKY_USERNAME", "")
-OPENSKY_PASSWORD: str = os.getenv("OPENSKY_PASSWORD", "")
+    OPENSKY_PASSWORD: str = os.getenv("OPENSKY_PASSWORD", "")
 NASA_EARTHDATA_USERNAME: str = os.getenv("NASA_EARTHDATA_USERNAME", "")
 NASA_EARTHDATA_PASSWORD: str = os.getenv("NASA_EARTHDATA_PASSWORD", "")
 FR24_API_TOKEN: str = os.getenv("FR24_API_TOKEN", "")
