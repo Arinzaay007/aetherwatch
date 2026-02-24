@@ -109,19 +109,12 @@ def fetch_opensky(
     lamin: float = -90, lomin: float = -180,
     lamax: float = 90,  lomax: float = 180,
 ) -> list[dict]:
-    """
-    Fetch live aircraft states from OpenSky Network.
-    Cached for OPENSKY_CACHE_TTL seconds to respect rate limits.
-    Falls back to mock data on any error.
-    """
     cache_key = f"opensky:{lamin},{lomin},{lamax},{lomax}"
     cached = aviation_cache.get(cache_key)
     if cached is not None:
-        logger.debug("Aviation: serving from cache ({} aircraft)", len(cached))
         return cached
 
     if FORCE_MOCK_DATA:
-        logger.info("Aviation: FORCE_MOCK_DATA — returning mock aircraft")
         mock = generate_mock_aircraft(500)
         aviation_cache.set(cache_key, mock)
         return mock
@@ -142,64 +135,14 @@ def fetch_opensky(
         data = resp.json()
         states = data.get("states") or []
         aircraft = [p for s in states if (p := _parse_opensky_state(s)) is not None]
-        # Filter airborne only by default
         aircraft = [a for a in aircraft if not a["on_ground"]]
         logger.info("OpenSky: fetched {} airborne aircraft", len(aircraft))
         aviation_cache.set(cache_key, aircraft)
         return aircraft
-
-    except requests.exceptions.ConnectionError:
-        logger.warning("OpenSky: connection error — returning mock data")
-    except requests.exceptions.Timeout:
-        logger.warning("OpenSky: timeout — returning mock data")
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 429:
-            logger.warning("OpenSky: rate limited (429) — returning mock data")
-        else:
-            logger.warning("OpenSky HTTP error: {} — returning mock data", e)
     except Exception as e:
-        logger.error("OpenSky unexpected error: {} — returning mock data", e)
+        logger.warning("OpenSky failed: {} - trying adsb.fi", e)
 
-    # Try ADS-B Exchange public feed as fallback
-    try:
-        import requests
-        resp = requests.get(
-            "https://opendata.adsb.fi/api/v2/aircraft",
-            timeout=10,
-            headers={"User-Agent": "AetherWatch/1.0"}
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            aircraft = []
-            for ac in data.get("aircraft", [])[:500]:
-                if not ac.get("lat") or not ac.get("lon"):
-                    continue
-                aircraft.append({
-                    "icao24": ac.get("hex", ""),
-                    "callsign": ac.get("flight", "UNKNOWN").strip(),
-                    "origin_country": ac.get("r", ""),
-                    "latitude": float(ac.get("lat", 0)),
-                    "longitude": float(ac.get("lon", 0)),
-                    "altitude_ft": float(ac.get("alt_baro", 0) or 0),
-                    "altitude_m": float(ac.get("alt_baro", 0) or 0) * 0.3048,
-                    "velocity_kts": float(ac.get("gs", 0) or 0),
-                    "heading": float(ac.get("track", 0) or 0),
-                    "vertical_rate": float(ac.get("baro_rate", 0) or 0),
-                    "on_ground": ac.get("alt_baro") == "ground",
-                    "squawk": ac.get("squawk", "----"),
-                    "aircraft_type": ac.get("t", ""),
-                    "last_contact": 0,
-                    "is_mock": False,
-                })
-            if aircraft:
-                aviation_cache.set(cache_key, aircraft)
-                return aircraft
-    except Exception:
-        pass
-
-    mock = generate_mock_aircraft(500)
-    aviation_cache.set(cache_key, mock)
-    return mock
+    return _fallback_aircraft(aviation_cache, cache_key)
 
 
 def fetch_fr24(bbox: dict | None = None) -> list[dict]:
