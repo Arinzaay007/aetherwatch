@@ -26,32 +26,44 @@ load_dotenv()
 # Always comply with local privacy laws (GDPR, CCPA, etc.)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Credentials (loaded from .env) ──────────────────────────────────────────
-try:
-    import streamlit as st
-    OPENSKY_USERNAME: str = st.secrets.get("OPENSKY_USERNAME", os.getenv("OPENSKY_USERNAME", ""))
-    OPENSKY_PASSWORD: str = st.secrets.get("OPENSKY_PASSWORD", os.getenv("OPENSKY_PASSWORD", ""))
-except Exception:
-    OPENSKY_USERNAME: str = os.getenv("OPENSKY_USERNAME", "")
-    OPENSKY_PASSWORD: str = os.getenv("OPENSKY_PASSWORD", "")
-NASA_EARTHDATA_USERNAME: str = os.getenv("NASA_EARTHDATA_USERNAME", "")
-NASA_EARTHDATA_PASSWORD: str = os.getenv("NASA_EARTHDATA_PASSWORD", "")
-FR24_API_TOKEN: str = os.getenv("FR24_API_TOKEN", "")
+# ── Credentials ──────────────────────────────────────────────────────────────
+def _get_secret(key: str, fallback: str = "") -> str:
+    """Read from Streamlit secrets first, then env vars, then fallback."""
+    try:
+        import streamlit as st
+        # st.secrets[key] raises KeyError if missing — handle it properly
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return os.getenv(key, fallback)
+
+def _get_bool_secret(key: str, fallback: bool = False) -> bool:
+    """Read a boolean secret/env var."""
+    val = _get_secret(key, str(fallback))
+    return val.lower() in ("true", "1", "yes")
+
+OPENSKY_USERNAME: str = _get_secret("OPENSKY_USERNAME")
+OPENSKY_PASSWORD: str = _get_secret("OPENSKY_PASSWORD")
+NASA_EARTHDATA_USERNAME: str = _get_secret("NASA_EARTHDATA_USERNAME")
+NASA_EARTHDATA_PASSWORD: str = _get_secret("NASA_EARTHDATA_PASSWORD")
+FR24_API_TOKEN: str = _get_secret("FR24_API_TOKEN")
+FR24_TOKEN: str = FR24_API_TOKEN
 
 # Alert integrations
-SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER: str = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
-ALERT_EMAIL_TO: str = os.getenv("ALERT_EMAIL_TO", "")
-TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM_NUMBER: str = os.getenv("TWILIO_FROM_NUMBER", "")
-TWILIO_TO_NUMBER: str = os.getenv("TWILIO_TO_NUMBER", "")
+SMTP_HOST: str = _get_secret("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT: int = int(_get_secret("SMTP_PORT", "587"))
+SMTP_USER: str = _get_secret("SMTP_USER")
+SMTP_PASSWORD: str = _get_secret("SMTP_PASSWORD")
+ALERT_EMAIL_TO: str = _get_secret("ALERT_EMAIL_TO")
+TWILIO_ACCOUNT_SID: str = _get_secret("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN: str = _get_secret("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER: str = _get_secret("TWILIO_FROM_NUMBER")
+TWILIO_TO_NUMBER: str = _get_secret("TWILIO_TO_NUMBER")
 
 # Developer overrides
-FORCE_MOCK_DATA: bool = os.getenv("FORCE_MOCK_DATA", "false").lower() == "true"
-LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+FORCE_MOCK_DATA: bool = _get_bool_secret("FORCE_MOCK_DATA", False)
+LOG_LEVEL: str = _get_secret("LOG_LEVEL", "INFO")
 
 # ── OpenSky Network ──────────────────────────────────────────────────────────
 OPENSKY_BASE_URL = "https://opensky-network.org/api"
@@ -72,6 +84,7 @@ FR24_FLIGHTS_URL = f"{FR24_BASE_URL}/live/flight-positions/light"
 
 # ── NASA GIBS ────────────────────────────────────────────────────────────────
 NASA_GIBS_WMS_URL = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
+NASA_GIBS_WMS = NASA_GIBS_WMS_URL
 NASA_CACHE_TTL = 300  # 5 minutes
 
 NASA_LAYERS: dict[str, str] = {
@@ -84,9 +97,6 @@ NASA_LAYERS: dict[str, str] = {
 }
 
 # ── Traffic Cameras ──────────────────────────────────────────────────────────
-# Mix of public government / civic JPEG snapshot cameras.
-# System gracefully falls back to mock frames if a feed is unavailable.
-# All URLs are from public/open government sources.
 PUBLIC_CAMERAS: list[dict] = [
     {
         "id": "cam_nyc_01",
@@ -181,10 +191,11 @@ PUBLIC_CAMERAS: list[dict] = [
 ]
 
 # ── YOLO ─────────────────────────────────────────────────────────────────────
-YOLO_MODEL = "yolov8n.pt"          # Nano model — fastest, auto-downloaded
-YOLO_CONFIDENCE = 0.35             # Minimum detection confidence
-YOLO_INPUT_SIZE = 640              # Inference image size (px)
-YOLO_TARGET_CLASSES = [            # COCO class IDs to highlight
+YOLO_MODEL = "yolov8n.pt"
+YOLO_MODEL_NAME = "yolov8n.pt"
+YOLO_CONFIDENCE = 0.35
+YOLO_INPUT_SIZE = 640
+YOLO_TARGET_CLASSES = [
     0,   # person
     1,   # bicycle
     2,   # car
@@ -197,18 +208,17 @@ YOLO_TARGET_CLASSES = [            # COCO class IDs to highlight
 ]
 
 # ── Anomaly Detection Thresholds ─────────────────────────────────────────────
-ANOMALY_VEHICLE_CLUSTER_MIN = 6    # N+ vehicles in frame → alert
-ANOMALY_PERSON_CLUSTER_MIN = 10    # N+ people in frame → crowd alert
-ANOMALY_LOW_ALTITUDE_FT = 3000     # Aircraft below this → alert
-ANOMALY_HIGH_SPEED_KTS = 600       # Aircraft above this → alert
+ANOMALY_VEHICLE_CLUSTER_MIN = 6
+ANOMALY_PERSON_CLUSTER_MIN = 10
+ANOMALY_LOW_ALTITUDE_FT = 3000
+ANOMALY_HIGH_SPEED_KTS = 600
 
 # ── UI Defaults ──────────────────────────────────────────────────────────────
 DEFAULT_MAP_CENTER = [30.0, 0.0]
 DEFAULT_MAP_ZOOM = 3
-MAX_ALERT_LOG_SIZE = 200           # Keep last N alerts in memory
-DEFAULT_REFRESH_S = 20             # Auto-refresh interval in seconds
-CAMERA_GRID_MAX = 4                # Max simultaneous camera panels
-# ── Missing settings (patch) ─────────────────────────────────────────────────
+MAX_ALERT_LOG_SIZE = 200
+DEFAULT_REFRESH_S = 20
+CAMERA_GRID_MAX = 4
 APP_VERSION = "1.0.0"
 DEFAULT_MAP_TILE = "CartoDB dark_matter"
 DEFAULT_REFRESH_RATE = 30
@@ -216,8 +226,6 @@ MIN_REFRESH_RATE = 10
 MAX_REFRESH_RATE = 120
 CACHE_TTL_AVIATION = 30
 CACHE_TTL_SATELLITE = 300
-NASA_GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
-ALERT_EMAIL_TO: str = os.getenv("ALERT_EMAIL_TO", "")
 
 MAP_TILES = {
     "CartoDB dark_matter": "CartoDB dark_matter",
@@ -234,5 +242,3 @@ SATELLITE_LAYERS = {
     "Land Surface Temp": "MODIS_Terra_Land_Surface_Temp_Day",
     "Aqua True Color": "MODIS_Aqua_CorrectedReflectance_TrueColor",
 }
-FR24_TOKEN: str = os.getenv("FR24_API_TOKEN", "")
-YOLO_MODEL_NAME = "yolov8n.pt"
