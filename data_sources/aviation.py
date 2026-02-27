@@ -1,8 +1,7 @@
 """
 AetherWatch — Aviation Data Source
-Primary:  airplanes.live (free, no auth, global via grid queries)
-Fallback: adsb.fi (free, no auth, lat/lon/dist queries)
-Fallback: OpenSky Network
+Primary:  airplanes.live  (free, no auth, wide radius grid)
+Fallback: OpenSky Network via OAuth2 client credentials
 Last:     Mock data
 """
 
@@ -21,15 +20,49 @@ from utils.cache import aviation_cache
 from utils.logger import logger
 from utils.mock_data import generate_mock_aircraft
 
+OPENSKY_TOKEN_URL  = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
 
-# Grid of lat/lon points for broad global coverage
-# airplanes.live max radius = 250 nm per query
-_GRID_POINTS = [
-    (0,    0),
-    (0,   90), (0,  -90), (0,  180),
-    (45,  45), (45, -45), (45,  135), (45, -135),
-    (-45, 45), (-45,-45), (-45, 135), (-45,-135),
+# Read OAuth2 credentials from Streamlit secrets (same place as username/password)
+import streamlit as st
+
+def _get_opensky_oauth_token() -> str | None:
+    """Get an OAuth2 bearer token using client credentials flow."""
+    try:
+        client_id     = st.secrets.get("OPENSKY_CLIENT_ID", "")
+        client_secret = st.secrets.get("OPENSKY_CLIENT_SECRET", "")
+        if not client_id or not client_secret:
+            logger.warning("OpenSky OAuth2: OPENSKY_CLIENT_ID or OPENSKY_CLIENT_SECRET not set in secrets")
+            return None
+
+        resp = requests.post(
+            OPENSKY_TOKEN_URL,
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     client_id,
+                "client_secret": client_secret,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning("OpenSky token request failed: {}", resp.status_code)
+            return None
+
+        token = resp.json().get("access_token")
+        if token:
+            logger.info("OpenSky OAuth2 token obtained")
+        return token
+    except Exception as e:
+        logger.warning("OpenSky OAuth2 token error: {}", e)
+        return None
+
+
+# Wide-coverage grid for airplanes.live (6000nm radius per point)
+_GLOBAL_GRID = [
+    (40,  -40),
+    (40,  140),
+    (-30, -60),
+    (-30,  120),
 ]
 
 _session = requests.Session()
@@ -37,7 +70,6 @@ _session.headers.update({"User-Agent": "AetherWatch/1.0"})
 
 
 def _parse_v2_aircraft(ac: dict) -> dict | None:
-    """Parse an aircraft dict from airplanes.live / adsb.fi v2/v3 JSON format."""
     try:
         lat = ac.get("lat")
         lon = ac.get("lon")
@@ -76,21 +108,18 @@ def _parse_v2_aircraft(ac: dict) -> dict | None:
 
 
 def _fetch_airplanes_live() -> list[dict] | None:
-    """
-    Fetch live aircraft from airplanes.live via a 12-point global grid.
-    Each query covers 250 nm radius. Results are deduplicated by ICAO hex.
-    """
     seen = set()
     aircraft = []
-    errors = 0
+    success = 0
 
-    for lat, lon in _GRID_POINTS:
-        url = f"https://api.airplanes.live/v2/point/{lat}/{lon}/250"
+    for lat, lon in _GLOBAL_GRID:
+        url = f"https://api.airplanes.live/v2/point/{lat}/{lon}/6000"
         try:
-            resp = _session.get(url, timeout=10)
+            resp = _session.get(url, timeout=20)
             if resp.status_code != 200:
-                errors += 1
+                logger.warning("airplanes.live {}/{} status {}", lat, lon, resp.status_code)
                 continue
+            count = 0
             for ac in resp.json().get("ac", []):
                 hex_id = ac.get("hex", "")
                 if hex_id in seen:
@@ -99,62 +128,22 @@ def _fetch_airplanes_live() -> list[dict] | None:
                 parsed = _parse_v2_aircraft(ac)
                 if parsed and not parsed["on_ground"]:
                     aircraft.append(parsed)
+                    count += 1
+            logger.info("airplanes.live {}/{}: {} aircraft", lat, lon, count)
+            success += 1
         except Exception as e:
             logger.warning("airplanes.live {}/{} error: {}", lat, lon, e)
-            errors += 1
 
-    if errors == len(_GRID_POINTS):
+    if success == 0:
         logger.warning("airplanes.live: all grid points failed")
         return None
 
     if aircraft:
         result = aircraft[:500]
-        logger.info("airplanes.live: {} airborne aircraft", len(result))
+        logger.info("airplanes.live total: {} unique airborne aircraft", len(result))
         return result
 
-    logger.warning("airplanes.live: no airborne aircraft found")
-    return None
-
-
-def _fetch_adsb_fi() -> list[dict] | None:
-    """
-    Fetch from adsb.fi using lat/lon/dist v3 queries.
-    NOTE: adsb.fi does NOT have a global /aircraft endpoint.
-    """
-    seen = set()
-    aircraft = []
-    points = [(0, 0), (0, 90), (0, -90), (45, 45), (45, -45), (-45, 45), (-45, -45)]
-    errors = 0
-
-    for lat, lon in points:
-        url = f"https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/500"
-        try:
-            resp = _session.get(url, timeout=10)
-            if resp.status_code != 200:
-                errors += 1
-                continue
-            for ac in resp.json().get("aircraft", []):
-                hex_id = ac.get("hex", "")
-                if hex_id in seen:
-                    continue
-                seen.add(hex_id)
-                parsed = _parse_v2_aircraft(ac)
-                if parsed and not parsed["on_ground"]:
-                    aircraft.append(parsed)
-        except Exception as e:
-            logger.warning("adsb.fi {}/{} error: {}", lat, lon, e)
-            errors += 1
-
-    if errors == len(points):
-        logger.warning("adsb.fi: all points failed")
-        return None
-
-    if aircraft:
-        result = aircraft[:500]
-        logger.info("adsb.fi: {} airborne aircraft", len(result))
-        return result
-
-    logger.warning("adsb.fi: no airborne aircraft found")
+    logger.warning("airplanes.live: connected but no airborne aircraft")
     return None
 
 
@@ -187,22 +176,39 @@ def _parse_opensky_state(state: list) -> dict | None:
 
 
 def _fetch_opensky(lamin=-90, lomin=-180, lamax=90, lomax=180) -> list[dict] | None:
+    params = {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax}
+
+    # Try OAuth2 first
+    token = _get_opensky_oauth_token()
+    if token:
+        try:
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = _session.get(OPENSKY_STATES_URL, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            states = resp.json().get("states") or []
+            aircraft = [p for s in states if (p := _parse_opensky_state(s)) is not None]
+            aircraft = [a for a in aircraft if not a["on_ground"]]
+            if aircraft:
+                logger.info("OpenSky (OAuth2): {} airborne aircraft", len(aircraft))
+                return aircraft
+            logger.warning("OpenSky (OAuth2): connected but no aircraft returned")
+            return None
+        except Exception as e:
+            logger.warning("OpenSky (OAuth2) request failed: {}", e)
+
+    # Try anonymous as last resort
     try:
-        params = {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax}
-        auth = None
-        if OPENSKY_USERNAME and OPENSKY_PASSWORD:
-            auth = HTTPBasicAuth(OPENSKY_USERNAME, OPENSKY_PASSWORD)
-        resp = _session.get(OPENSKY_STATES_URL, params=params, auth=auth, timeout=15)
+        resp = _session.get(OPENSKY_STATES_URL, params=params, timeout=20)
         resp.raise_for_status()
         states = resp.json().get("states") or []
         aircraft = [p for s in states if (p := _parse_opensky_state(s)) is not None]
         aircraft = [a for a in aircraft if not a["on_ground"]]
         if aircraft:
-            logger.info("OpenSky: {} airborne aircraft", len(aircraft))
+            logger.info("OpenSky (anonymous): {} airborne aircraft", len(aircraft))
             return aircraft
         return None
     except Exception as e:
-        logger.warning("OpenSky failed: {}", e)
+        logger.warning("OpenSky (anonymous) failed: {}", e)
         return None
 
 
@@ -222,17 +228,12 @@ def fetch_opensky(lamin=-90, lomin=-180, lamax=90, lomax=180) -> list[dict]:
     logger.info("Trying airplanes.live…")
     aircraft = _fetch_airplanes_live()
 
-    # 2. adsb.fi
+    # 2. OpenSky OAuth2
     if not aircraft:
-        logger.info("Trying adsb.fi…")
-        aircraft = _fetch_adsb_fi()
-
-    # 3. OpenSky
-    if not aircraft:
-        logger.info("Trying OpenSky…")
+        logger.info("Trying OpenSky (OAuth2)…")
         aircraft = _fetch_opensky(lamin, lomin, lamax, lomax)
 
-    # 4. Mock
+    # 3. Mock
     if not aircraft:
         logger.warning("All live sources failed — using mock data")
         aircraft = generate_mock_aircraft(500)
