@@ -1,11 +1,13 @@
 """
 AetherWatch — Aviation Data Source
+Primary: adsb.fi (free, no auth, no rate limits)
+Fallback: OpenSky Network (requires account for higher limits)
+Last fallback: Mock data
 """
 
 import time
 import requests
 from requests.auth import HTTPBasicAuth
-from typing import Any
 
 from config.settings import (
     OPENSKY_USERNAME,
@@ -19,8 +21,7 @@ from utils.logger import logger
 from utils.mock_data import generate_mock_aircraft
 
 OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
-FR24_BASE_URL = "https://fr24api.flightradar24.com/api"
-FR24_FLIGHTS_URL = f"{FR24_BASE_URL}/live/flight-positions/light"
+ADSB_FI_URL = "https://opendata.adsb.fi/api/v2/aircraft"
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "AetherWatch/1.0"})
@@ -54,81 +55,115 @@ def _parse_opensky_state(state: list) -> dict | None:
         return None
 
 
-def _fallback_aircraft(cache, cache_key):
-    """Try adsb.fi public feed, fall back to mock."""
+def _fetch_adsb_fi() -> list[dict] | None:
+    """Fetch from adsb.fi — free, open, no auth needed."""
     try:
-        resp = requests.get(
-            "https://opendata.adsb.fi/api/v2/aircraft",
-            timeout=10,
-            headers={"User-Agent": "AetherWatch/1.0"}
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            aircraft = []
-            for ac in data.get("aircraft", [])[:500]:
-                if not ac.get("lat") or not ac.get("lon"):
-                    continue
-                aircraft.append({
-                    "icao24":         ac.get("hex", ""),
-                    "callsign":       (ac.get("flight") or "UNKNOWN").strip(),
-                    "origin_country": ac.get("r", ""),
-                    "latitude":       float(ac.get("lat", 0)),
-                    "longitude":      float(ac.get("lon", 0)),
-                    "altitude_ft":    float(ac.get("alt_baro", 0) or 0),
-                    "altitude_m":     float(ac.get("alt_baro", 0) or 0) * 0.3048,
-                    "velocity_kts":   float(ac.get("gs", 0) or 0),
-                    "heading":        float(ac.get("track", 0) or 0),
-                    "vertical_rate":  float(ac.get("baro_rate", 0) or 0),
-                    "on_ground":      ac.get("alt_baro") == "ground",
-                    "squawk":         ac.get("squawk", "----"),
-                    "aircraft_type":  ac.get("t", ""),
-                    "last_contact":   int(time.time()),
-                    "is_mock":        False,
-                })
-            if aircraft:
-                logger.info("adsb.fi: fetched {} aircraft", len(aircraft))
-                cache.set(cache_key, aircraft)
-                return aircraft
+        resp = requests.get(ADSB_FI_URL, timeout=15,
+                            headers={"User-Agent": "AetherWatch/1.0"})
+        if resp.status_code != 200:
+            logger.warning("adsb.fi returned status {}", resp.status_code)
+            return None
+
+        data = resp.json()
+        aircraft = []
+        for ac in data.get("aircraft", []):
+            lat = ac.get("lat")
+            lon = ac.get("lon")
+            if lat is None or lon is None:
+                continue
+            alt_baro = ac.get("alt_baro", 0)
+            if alt_baro == "ground":
+                alt_baro = 0
+                on_ground = True
+            else:
+                on_ground = False
+                try:
+                    alt_baro = float(alt_baro or 0)
+                except Exception:
+                    alt_baro = 0
+
+            aircraft.append({
+                "icao24":         ac.get("hex", ""),
+                "callsign":       (ac.get("flight") or "UNKNOWN").strip(),
+                "origin_country": ac.get("r", ""),
+                "latitude":       float(lat),
+                "longitude":      float(lon),
+                "altitude_ft":    float(alt_baro),
+                "altitude_m":     float(alt_baro) * 0.3048,
+                "velocity_kts":   float(ac.get("gs", 0) or 0),
+                "heading":        float(ac.get("track", 0) or 0),
+                "vertical_rate":  float(ac.get("baro_rate", 0) or 0),
+                "on_ground":      on_ground,
+                "squawk":         ac.get("squawk", "----"),
+                "aircraft_type":  ac.get("t", ""),
+                "last_contact":   int(time.time()),
+                "is_mock":        False,
+            })
+
+        # Filter airborne only, cap at 500
+        airborne = [a for a in aircraft if not a["on_ground"]][:500]
+        if airborne:
+            logger.info("adsb.fi: {} airborne aircraft fetched", len(airborne))
+            return airborne
+
+        logger.warning("adsb.fi: no airborne aircraft in response")
+        return None
+
     except Exception as e:
         logger.warning("adsb.fi failed: {}", e)
-
-    logger.info("Using mock aircraft data")
-    mock = generate_mock_aircraft(500)
-    cache.set(cache_key, mock)
-    return mock
+        return None
 
 
-def fetch_opensky(
-    lamin: float = -90, lomin: float = -180,
-    lamax: float = 90,  lomax: float = 180,
-) -> list[dict]:
+def _fetch_opensky(lamin=-90, lomin=-180, lamax=90, lomax=180) -> list[dict] | None:
+    """Fetch from OpenSky — requires account for best results."""
+    try:
+        params = {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax}
+        auth = None
+        if OPENSKY_USERNAME and OPENSKY_PASSWORD:
+            auth = HTTPBasicAuth(OPENSKY_USERNAME, OPENSKY_PASSWORD)
+
+        resp = _session.get(OPENSKY_STATES_URL, params=params, auth=auth, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        states = data.get("states") or []
+        aircraft = [p for s in states if (p := _parse_opensky_state(s)) is not None]
+        aircraft = [a for a in aircraft if not a["on_ground"]]
+        if aircraft:
+            logger.info("OpenSky: {} airborne aircraft fetched", len(aircraft))
+            return aircraft
+        return None
+    except Exception as e:
+        logger.warning("OpenSky failed: {}", e)
+        return None
+
+
+def fetch_opensky(lamin=-90, lomin=-180, lamax=90, lomax=180) -> list[dict]:
     cache_key = f"opensky:{lamin},{lomin},{lamax},{lomax}"
     cached = aviation_cache.get(cache_key)
     if cached is not None:
         return cached
 
     if FORCE_MOCK_DATA:
-        return _fallback_aircraft(aviation_cache, cache_key)
+        logger.info("FORCE_MOCK_DATA is set — using mock aircraft")
+        mock = generate_mock_aircraft(500)
+        aviation_cache.set(cache_key, mock)
+        return mock
 
-    params = {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax}
-    auth = None
-    if OPENSKY_USERNAME and OPENSKY_PASSWORD:
-        auth = HTTPBasicAuth(OPENSKY_USERNAME, OPENSKY_PASSWORD)
+    # 1. Try adsb.fi first (most reliable on Streamlit Cloud)
+    aircraft = _fetch_adsb_fi()
 
-    try:
-        resp = _session.get(OPENSKY_STATES_URL, params=params, auth=auth, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        states = data.get("states") or []
-        aircraft = [p for s in states if (p := _parse_opensky_state(s)) is not None]
-        aircraft = [a for a in aircraft if not a["on_ground"]]
-        logger.info("OpenSky: fetched {} airborne aircraft", len(aircraft))
-        aviation_cache.set(cache_key, aircraft)
-        return aircraft
-    except Exception as e:
-        logger.warning("OpenSky failed: {} - trying fallback", e)
+    # 2. Try OpenSky if adsb.fi failed
+    if not aircraft:
+        logger.info("adsb.fi unavailable, trying OpenSky…")
+        aircraft = _fetch_opensky(lamin, lomin, lamax, lomax)
 
-    return _fallback_aircraft(aviation_cache, cache_key)
+    # 3. Fall back to mock
+    if not aircraft:
+        logger.warning("All live sources failed — using mock data")
+        aircraft = generate_mock_aircraft(500)
+
+    aviation_cache.set(cache_key, aircraft)
+    return aircraft
 
 
 def get_aircraft(bbox: dict | None = None) -> list[dict]:
@@ -156,17 +191,17 @@ class Aircraft:
 
     def to_dict(self) -> dict:
         return {
-            "callsign": self.callsign,
-            "country":  self.origin_country,
-            "alt_ft":   self.altitude_ft,
+            "callsign":  self.callsign,
+            "country":   self.origin_country,
+            "alt_ft":    self.altitude_ft,
             "speed_kts": self.velocity_kts,
-            "heading":  self.heading,
+            "heading":   self.heading,
             "on_ground": self.on_ground,
-            "squawk":   self.squawk,
-            "type":     self.aircraft_type,
-            "lat":      self.latitude,
-            "lon":      self.longitude,
-            "is_mock":  self.is_mock,
+            "squawk":    self.squawk,
+            "type":      self.aircraft_type,
+            "lat":       self.latitude,
+            "lon":       self.longitude,
+            "is_mock":   self.is_mock,
         }
 
     @property
@@ -178,7 +213,7 @@ class Aircraft:
           {status} | {self.origin_country}<br>
           Squawk: {self.squawk} | {self.aircraft_type}<br>
           Alt: {self.altitude_ft:,.0f} ft<br>
-          Speed: {self.velocity_kts:.0f} kts | Hdg: {self.heading:.0f}deg
+          Speed: {self.velocity_kts:.0f} kts | Hdg: {self.heading:.0f}°
           {mock_tag}</div>"""
 
 
@@ -209,5 +244,7 @@ def check_aviation_anomalies(aircraft):
                 "label":     SQUAWK_LABELS.get(squawk, "Emergency"),
                 "latitude":  ac.latitude if hasattr(ac, "latitude") else ac.get("latitude", 0.0),
                 "longitude": ac.longitude if hasattr(ac, "longitude") else ac.get("longitude", 0.0),
+                "level":     "CRITICAL",
+                "message":   f"{ac.callsign if hasattr(ac, 'callsign') else ac.get('callsign')} squawking {squawk} ({SQUAWK_LABELS.get(squawk, 'Emergency')})",
             })
     return anomalies
